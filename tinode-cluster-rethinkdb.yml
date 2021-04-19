@@ -1,0 +1,235 @@
+version: '3.7'
+
+networks:
+  tinode-network:
+    external: true
+
+x-tinode: &tinode-base
+  image: tinode/tinode:latest
+  restart: always
+  volumes:
+    - ./htpasswd:/htpasswd
+  networks:
+    - ${NETWORK}
+  labels:
+    - "traefik.enable=true"
+    - "traefik.docker.network=${NETWORK}"
+    - "traefik.http.services.lb-tinode-cluster.loadbalancer.server.port=6060"
+
+    - "traefik.http.routers.unsecured-tinode-cluster.rule=Host(`tinode.${DOMAIN}`)"
+    - "traefik.http.routers.unsecured-tinode-cluster.entrypoints=entrypoint-http"
+    - "traefik.http.routers.unsecured-tinode-cluster.middlewares=redirect-secured@docker"
+
+    - "traefik.http.routers.secured-tinode-cluster.rule=Host(`tinode.${DOMAIN}`)"
+    - "traefik.http.routers.secured-tinode-cluster.entrypoints=entrypoint-https"
+    - "traefik.http.routers.secured-tinode-cluster.tls=true"
+    - "traefik.http.routers.secured-tinode-cluster.tls.certresolver=ingress-cert"
+    - "traefik.http.routers.secured-tinode-cluster.middlewares=ipwhitelist"
+
+    - "traefik.http.middlewares.ipwhitelist.ipwhitelist.sourcerange=${WHITELISTIP}"
+    - "traefik.http.middlewares.redirect-secured.redirectscheme.scheme=https"
+
+x-exporter: &exporter-base
+  image: tinode/exporter:latest
+  restart: always
+  volumes:
+    - ./htpasswd:/htpasswd
+  networks:
+    - ${NETWORK}
+
+x-tinode-env-vars: &tinode-env-vars
+  "STORE_USE_ADAPTER": "rethinkdb"
+  "PPROF_URL": "/pprof"
+  #"EXT_CONFIG": "/etc/tinode/tinode.conf"
+  "TNPG_PUSH_ENABLED": "false"
+  #"TNPG_USER": "<user name>"
+  #"TNPG_AUTH_TOKEN": "<token>"
+  "FCM_PUSH_ENABLED": "false"
+  #"FCM_CRED_FILE": "<path to FCM credentials file>"
+  #"FCM_INCLUDE_ANDROID_NOTIFICATION": false
+  #"FCM_API_KEY": "AIzaSyD6X4ULR-RUsobvs1zZ2bHdJuPz39q2tbQ"
+  #"FCM_APP_ID": "1:114126160546:web:aca6ea2981feb81fb44dfb"
+  #"FCM_PROJECT_ID": "tinode-1000"
+  #"FCM_SENDER_ID": 114126160546
+  #"FCM_VAPID_KEY": "BOgQVPOMzIMXUpsYGpbVkZoEBc0ifKY_f2kSU5DNDGYI6i6CoKqqxDd7w7PJ3FaGRBgVGJffldETumOx831jl58"
+  #"IOS_UNIV_LINKS_APP_ID": "<ios universal links app id>"
+  #"CLUSTER_NUM_PROXY_EVENT_GOROUTINES": <size of proxy event goroutine pool>
+
+x-exporter-env-vars: &exporter-env-vars
+  #"SERVE_FOR": "influxdb"
+  #"INFLUXDB_VERSION": 1.7
+  #"INFLUXDB_ORGANIZATION": "<your organization>"
+  #"INFLUXDB_PUSH_INTERVAL": 30
+  #"INFLUXDB_PUSH_ADDRESS": "https://mon.tinode.co/intake"
+  #"INFLUXDB_AUTH_TOKEN": "<auth token>"
+  # Prometheus configuration:
+  "SERVE_FOR": "prometheus"
+  "PROM_NAMESPACE": "tinode"
+
+services:
+  db:
+    #image: rethinkdb:2.4.1
+    build: rethinkdb/.
+    container_name: rethinkdb
+    hostname: rethinkdb
+    command: rethinkdb --bind all --canonical-address rethinkdb --http-port ${RETHINKDB_HTTP_PORT}
+    networks:
+      - ${NETWORK}
+    volumes:
+      - ./htpasswd:/htpasswd
+      - /data/rethinkdb/data:/data
+      #- ./conf.rethinkdb:/etc/rethinkdb/.conf
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${NETWORK}"
+      - "traefik.http.services.rethinkdb-cluster.loadbalancer.server.port=${RETHINKDB_HTTP_PORT}"
+  
+      - "traefik.http.routers.unsecured-rethinkdb-cluster.rule=Host(`rethinkdb.${DOMAIN}`)"
+      - "traefik.http.routers.unsecured-rethinkdb-cluster.entrypoints=entrypoint-http"
+      - "traefik.http.routers.unsecured-rethinkdb-cluster.middlewares=redirect-secured@docker"
+  
+      - "traefik.http.routers.secured-rethinkdb-cluster.rule=Host(`rethinkdb.${DOMAIN}`)"
+      - "traefik.http.routers.secured-rethinkdb-cluster.entrypoints=entrypoint-https"
+      - "traefik.http.routers.secured-rethinkdb-cluster.tls=true"
+      - "traefik.http.routers.secured-rethinkdb-cluster.tls.certresolver=ingress-cert"
+      - "traefik.http.routers.secured-rethinkdb-cluster.middlewares=secured-traefik-chain"
+
+      - "traefik.http.middlewares.secured-traefik-chain.chain.middlewares=ipwhitelist,basicauth-traefik"
+      - "traefik.http.middlewares.ipwhitelist.ipwhitelist.sourcerange=${WHITELISTIP}"
+      - "traefik.http.middlewares.basicauth-traefik.basicauth.usersfile=/htpasswd"
+      - "traefik.http.middlewares.redirect-secured.redirectscheme.scheme=https"
+
+  db-exporter:
+    image: terzom/rethinkdb-exporter:latest
+    container_name: rethinkdb-exporter
+    networks:
+      - ${NETWORK}
+    restart: always
+    command:
+      - "--web.listen-address=0.0.0.0:9055"
+      - "--db.address=rethinkdb:28015"
+      - "--web.telemetry-path=/10/metrics"
+      - "--stats.table-estimates=true"
+    volumes:
+      - ./htpasswd:/htpasswd
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${NETWORK}"
+
+      - "traefik.http.services.exporter-10.loadbalancer.server.port=9055"
+      - "traefik.http.routers.unsecured-exporter-10.rule=Host(`exporter.${DOMAIN}`) && PathPrefix(`/10/`)"
+      - "traefik.http.routers.unsecured-exporter-10.entrypoints=entrypoint-http"
+      - "traefik.http.routers.unsecured-exporter-10.middlewares=secured-traefik-chain"
+
+      - "traefik.http.middlewares.secured-traefik-chain.chain.middlewares=ipwhitelist,basicauth-traefik"
+      - "traefik.http.middlewares.ipwhitelist.ipwhitelist.sourcerange=${WHITELISTIP}"
+      - "traefik.http.middlewares.basicauth-traefik.basicauth.usersfile=/htpasswd"
+
+  tinode-0:
+    << : *tinode-base
+    container_name: tinode-0
+    hostname: tinode-0
+    #volumes:
+    # - <path to your tinode.conf>:/etc/tinode/tinode.conf
+    # - <path to your tinode-0 logs directory>:/var/log
+    environment:
+      << : *tinode-env-vars
+      "WAIT_FOR": "rethinkdb:${RETHINKDB_HTTP_PORT}"
+      "CLUSTER_SELF": "tinode-0"
+      "RESET_DB": ${RESET_DB:-false}
+      "UPGRADE_DB": ${UPGRADE_DB:-false}
+
+  tinode-1:
+    << : *tinode-base
+    container_name: tinode-1
+    hostname: tinode-1
+    #volumes:
+    # - <path to your tinode.conf>:/etc/tinode/tinode.conf
+    # - <path to your tinode-1 logs directory>:/var/log
+    environment:
+      << : *tinode-env-vars
+      "CLUSTER_SELF": "tinode-1"
+      "WAIT_FOR": "tinode-0:6060"
+      "NO_DB_INIT": "true"
+
+  tinode-2:
+    << : *tinode-base
+    container_name: tinode-2
+    hostname: tinode-2
+    #volumes:
+    # - <path to your tinode.conf>:/etc/tinode/tinode.conf
+    # - <path to your tinode-2 logs directory>:/var/log
+    environment:
+      << : *tinode-env-vars
+      "CLUSTER_SELF": "tinode-2"
+      "WAIT_FOR": "tinode-0:6060"
+      "NO_DB_INIT": "true"
+
+  exporter-0:
+    << : *exporter-base
+    container_name: exporter-0
+    hostname: exporter-0
+    environment:
+      << : *exporter-env-vars
+      "TINODE_ADDR": "http://tinode-0:6060/stats/expvar/"
+      "INSTANCE": "tinode-0"
+      "WAIT_FOR": "tinode-0:6060"
+      "PROM_METRICS_PATH": "/0/metrics"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${NETWORK}"
+
+      - "traefik.http.services.exporter-0.loadbalancer.server.port=6222"
+      - "traefik.http.routers.unsecured-exporter-0.rule=Host(`exporter.${DOMAIN}`) && PathPrefix(`/0/`)"
+      - "traefik.http.routers.unsecured-exporter-0.entrypoints=entrypoint-http"
+      - "traefik.http.routers.unsecured-exporter-0.middlewares=secured-traefik-chain"
+
+      - "traefik.http.middlewares.secured-traefik-chain.chain.middlewares=ipwhitelist,basicauth-traefik"
+      - "traefik.http.middlewares.ipwhitelist.ipwhitelist.sourcerange=${WHITELISTIP}"
+      - "traefik.http.middlewares.basicauth-traefik.basicauth.usersfile=/htpasswd"
+
+  exporter-1:
+    << : *exporter-base
+    container_name: exporter-1
+    hostname: exporter-1
+    environment:
+      << : *exporter-env-vars
+      "TINODE_ADDR": "http://tinode-1:6060/stats/expvar/"
+      "INSTANCE": "tinode-1"
+      "WAIT_FOR": "tinode-1:6060"
+      "PROM_METRICS_PATH": "/1/metrics"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${NETWORK}"
+
+      - "traefik.http.services.exporter-1.loadbalancer.server.port=6222"
+      - "traefik.http.routers.unsecured-exporter-1.rule=Host(`exporter.${DOMAIN}`) && PathPrefix(`/1/`)"
+      - "traefik.http.routers.unsecured-exporter-1.entrypoints=entrypoint-http"
+      - "traefik.http.routers.unsecured-exporter-1.middlewares=secured-traefik-chain"
+
+      - "traefik.http.middlewares.secured-traefik-chain.chain.middlewares=ipwhitelist,basicauth-traefik"
+      - "traefik.http.middlewares.ipwhitelist.ipwhitelist.sourcerange=${WHITELISTIP}"
+      - "traefik.http.middlewares.basicauth-traefik.basicauth.usersfile=/htpasswd"
+
+  exporter-2:
+    << : *exporter-base
+    container_name: exporter-2
+    hostname: exporter-2
+    environment:
+      << : *exporter-env-vars
+      "TINODE_ADDR": "http://tinode-2:6060/stats/expvar/"
+      "INSTANCE": "tinode-2"
+      "WAIT_FOR": "tinode-2:6060"
+      "PROM_METRICS_PATH": "/2/metrics"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${NETWORK}"
+
+      - "traefik.http.services.exporter-2.loadbalancer.server.port=6222"
+      - "traefik.http.routers.unsecured-exporter-2.rule=Host(`exporter.${DOMAIN}`) && PathPrefix(`/2/`)"
+      - "traefik.http.routers.unsecured-exporter-2.entrypoints=entrypoint-http"
+      - "traefik.http.routers.unsecured-exporter-2.middlewares=secured-traefik-chain"
+
+      - "traefik.http.middlewares.secured-traefik-chain.chain.middlewares=ipwhitelist,basicauth-traefik"
+      - "traefik.http.middlewares.ipwhitelist.ipwhitelist.sourcerange=${WHITELISTIP}"
+      - "traefik.http.middlewares.basicauth-traefik.basicauth.usersfile=/htpasswd"
