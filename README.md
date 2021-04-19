@@ -14,3 +14,6 @@ make up
 ```
 
 - make down, restart, vim, config, log
+
+# etc
+ - default htpasswd ( id: example, pw: example )
